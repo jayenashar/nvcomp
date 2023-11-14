@@ -129,6 +129,25 @@ public:
     m_ptrs = nvcomp::thrust::device_vector<void*>(ptrs);
   }
 
+  BatchData(const size_t data_size, const std::vector<size_t>& chunk_sizes) :
+      m_ptrs(),
+      m_sizes(),
+      m_data(),
+      m_size(chunk_sizes.size())
+  {
+    m_data = nvcomp::thrust::device_vector<uint8_t>(data_size);
+
+    std::vector<void*> ptrs(size());
+    size_t offset = 0;
+    for (size_t i = 0; i < size(); ++i) {
+      ptrs[i] = data() + offset;
+      offset += chunk_sizes[i];
+    }
+    m_ptrs = nvcomp::thrust::device_vector<void*>(ptrs);
+
+    m_sizes = nvcomp::thrust::device_vector<size_t>(chunk_sizes);
+  }
+
   BatchData(BatchData&& other) = default;
 
   // disable copying

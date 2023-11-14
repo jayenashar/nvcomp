@@ -119,6 +119,32 @@ public:
     }
   }
 
+  BatchDataCPU(
+    const std::vector<std::vector<char>>& data,
+    const std::vector<size_t>& sizes) :
+    m_ptrs(),
+    m_sizes(),
+    m_data(),
+    m_size(data.size())
+  {
+    m_sizes = sizes;
+
+    size_t data_size = std::accumulate(
+      m_sizes.begin(), m_sizes.end(), static_cast<size_t>(0));
+    m_data = std::vector<uint8_t>(data_size);
+
+    size_t offset = 0;
+    m_ptrs = std::vector<void*>(size());
+    for (size_t i = 0; i < size(); ++i) {
+      m_ptrs[i] = this->data() + offset;
+      offset += m_sizes[i];
+    }
+
+    for (size_t i = 0; i < size(); ++i)
+      std::memcpy(m_ptrs[i], data[i].data(), m_sizes[i]);
+  }
+
+
   BatchDataCPU(BatchDataCPU&& other) = default;
   BatchDataCPU(const BatchData& batch_data, bool copy_data = false);
   // disable copying

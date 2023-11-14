@@ -37,28 +37,27 @@ BatchDataCPU::BatchDataCPU(const BatchData& batch_data, bool copy_data) :
   m_data(),
   m_size()
 {
-  m_size = batch_data.size();std::cerr<<__LINE__<<std::endl;
-  m_sizes = std::vector<size_t>(batch_data.size());std::cerr<<__LINE__<<std::endl;
+  m_size = batch_data.size();
+  m_sizes = std::vector<size_t>(batch_data.size());
   CUDA_CHECK(cudaMemcpy(
       m_sizes.data(),
       batch_data.sizes(),
       batch_data.size() * sizeof(size_t),
-      cudaMemcpyDeviceToHost));std::cerr<<__LINE__<<std::endl;
+      cudaMemcpyDeviceToHost));
 
   size_t data_size = std::accumulate(
         sizes(),
         sizes() + size(),
-        static_cast<size_t>(0));std::cerr<<__LINE__<<std::endl;
-        std::cerr << "data_size: " << data_size << std::endl;
-  m_data = std::vector<uint8_t>(data_size);std::cerr<<__LINE__<<std::endl;
+        static_cast<size_t>(0));
+  m_data = std::vector<uint8_t>(data_size);
 
-  size_t offset = 0;std::cerr<<__LINE__<<std::endl;
-  std::vector<void*> ptrs(size());std::cerr<<__LINE__<<std::endl;
+  size_t offset = 0;
+  std::vector<void*> ptrs(size());
   for (size_t i = 0; i < size(); ++i) {
     ptrs[i] = data() + offset;
     offset += sizes()[i];
-  }std::cerr<<__LINE__<<std::endl;
-  m_ptrs = std::vector<void*>(ptrs);std::cerr<<__LINE__<<std::endl;
+  }
+  m_ptrs = std::vector<void*>(ptrs);
 
   if (copy_data) {
     std::vector<void*> src(batch_data.size());
@@ -68,14 +67,11 @@ BatchDataCPU::BatchDataCPU(const BatchData& batch_data, bool copy_data) :
         batch_data.size() * sizeof(void*),
         cudaMemcpyDeviceToHost));
 
-    const size_t* bytes = sizes();std::cerr<<__LINE__<<std::endl;
+    const size_t* bytes = sizes();
     for (size_t i = 0; i < size(); ++i) {
       CUDA_CHECK(
           cudaMemcpy(ptrs[i], src[i], bytes[i], cudaMemcpyDeviceToHost));
-      // std::cerr << "i: " << i << ", ptrs[i][0-10]: " << ((char*)ptrs[i])[0] << ((char*)ptrs[i])[1] << ((char*)ptrs[i])[2] << ((char*)ptrs[i])[3] << ((char*)ptrs[i])[4] << ((char*)ptrs[i])[5] << ((char*)ptrs[i])[6] << ((char*)ptrs[i])[7] << ((char*)ptrs[i])[8] << ((char*)ptrs[i])[9] << ((char*)ptrs[i])[10] << " ptrs[i][-10:]: " << ((char*)ptrs[i])[bytes[i]-10] << ((char*)ptrs[i])[bytes[i]-9] << ((char*)ptrs[i])[bytes[i]-8] << ((char*)ptrs[i])[bytes[i]-7] << ((char*)ptrs[i])[bytes[i]-6] << ((char*)ptrs[i])[bytes[i]-5] << ((char*)ptrs[i])[bytes[i]-4] << ((char*)ptrs[i])[bytes[i]-3] << ((char*)ptrs[i])[bytes[i]-2] << ((char*)ptrs[i])[bytes[i]-1] << std::endl;
     }
-
-    std::cerr << "strlen(ptrs[0]): " << strlen((char*)ptrs[0]) << std::endl;
   }
 }
 
@@ -83,10 +79,14 @@ BatchDataCPU::BatchDataCPU(const BatchData& batch_data, bool copy_data) :
  static void run_example(const std::vector<std::vector<char>>& data)
  {
    size_t total_bytes = 0;
-   std::vector<size_t> block_sizes;
+   std::vector<size_t> comp_sizes;
+   std::vector<size_t> decomp_sizes;
    for (const std::vector<char>& part : data) {
+     comp_sizes.push_back(part.size());
      // get uncompressed size of file from gzip footer
-     total_bytes += *(size_t*)(part.data() + part.size() - 4);
+     size_t size = *(size_t*)(part.data() + part.size() - 4);
+     total_bytes += size;
+     decomp_sizes.push_back(size);
    }
  
    std::cout << "----------" << std::endl;
@@ -97,7 +97,7 @@ BatchDataCPU::BatchDataCPU(const BatchData& batch_data, bool copy_data) :
    const size_t chunk_size = 1 << 16;
  
    // build up input batch on CPU
-   BatchDataCPU compress_data_cpu(data, data[0].size());
+   BatchDataCPU compress_data_cpu(data, comp_sizes);
    std::cout << "chunks: " << compress_data_cpu.size() << std::endl;
  
    // compute compression ratio
@@ -114,8 +114,7 @@ BatchDataCPU::BatchDataCPU(const BatchData& batch_data, bool copy_data) :
    BatchData compress_data(compress_data_cpu, true);
  
    // Allocate and build up decompression batch on GPU
-   BatchData decomp_data(total_bytes, 1);
-   std::cerr << "decomp_data.size(): " << decomp_data.size() << std::endl;
+   BatchData decomp_data(total_bytes, decomp_sizes);
  
    // Create CUDA stream
    cudaStream_t stream;
@@ -133,14 +132,12 @@ BatchDataCPU::BatchDataCPU(const BatchData& batch_data, bool copy_data) :
    if (status != nvcompSuccess) {
      throw std::runtime_error("nvcompBatchedGzipDecompressGetTempSize() failed.");
    }
-   std::cerr << "decomp_temp_bytes: " << decomp_temp_bytes << std::endl;
  
    void* d_decomp_temp;
    CUDA_CHECK(cudaMalloc(&d_decomp_temp, decomp_temp_bytes));
  
    size_t* d_decomp_sizes;
    CUDA_CHECK(cudaMalloc(&d_decomp_sizes, decomp_data.size() * sizeof(size_t)));
-   std::cerr << "d_decomp_sizes: " << d_decomp_sizes << std::endl;
  
    nvcompStatus_t* d_status_ptrs;
    CUDA_CHECK(cudaMalloc(&d_status_ptrs, decomp_data.size() * sizeof(nvcompStatus_t)));
@@ -163,32 +160,6 @@ BatchDataCPU::BatchDataCPU(const BatchData& batch_data, bool copy_data) :
      throw std::runtime_error("ERROR: nvcompBatchedGzipDecompressAsync() not successful");
    }
 
-   size_t* decomp_sizes_host = (size_t*)malloc(decomp_data.size() * sizeof(size_t));
-   std::cerr << "d_decomp_sizes: ";
-    CUDA_CHECK(cudaMemcpy(
-        decomp_sizes_host,
-        d_decomp_sizes,
-        decomp_data.size() * sizeof(size_t),
-        cudaMemcpyDeviceToHost));
-    for (size_t i = 0; i < decomp_data.size(); ++i) {
-      std::cerr << decomp_sizes_host[i] << " ";
-    }
-    std::cerr << std::endl;
-    free(decomp_sizes_host);
-
-    std::cerr << "d_status_ptrs: ";
-    nvcompStatus_t* status_ptrs_host = (nvcompStatus_t*)malloc(decomp_data.size() * sizeof(nvcompStatus_t));
-    CUDA_CHECK(cudaMemcpy(
-        status_ptrs_host,
-        d_status_ptrs,
-        decomp_data.size() * sizeof(nvcompStatus_t),
-        cudaMemcpyDeviceToHost));
-    for (size_t i = 0; i < decomp_data.size(); ++i) {
-      std::cerr << status_ptrs_host[i] << " ";
-    }
-    std::cerr << std::endl;
-    free(status_ptrs_host);
- 
    BatchDataCPU decomp_data_cpu(decomp_data, true);
    std::cout << "chunks: " << decomp_data_cpu.size() << std::endl;
 
@@ -218,6 +189,7 @@ BatchDataCPU::BatchDataCPU(const BatchData& batch_data, bool copy_data) :
    double decompression_throughput = ((double)total_bytes / ms) * 1e-6;
    std::cout << "decompression throughput (GB/s): " << decompression_throughput
              << std::endl;
+   std::cout << "ms: " << ms << std::endl;
  
    cudaFree(d_decomp_temp);
  

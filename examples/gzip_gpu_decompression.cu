@@ -81,12 +81,14 @@ BatchDataCPU::BatchDataCPU(const BatchData& batch_data, bool copy_data) :
    size_t total_bytes = 0;
    std::vector<size_t> comp_sizes;
    std::vector<size_t> decomp_sizes;
+   size_t max_decomp_size = 0;
    for (const std::vector<char>& part : data) {
      comp_sizes.push_back(part.size());
      // get uncompressed size of file from gzip footer
      size_t size = *(size_t*)(part.data() + part.size() - 4);
      total_bytes += size;
      decomp_sizes.push_back(size);
+     max_decomp_size = std::max(max_decomp_size, size);
    }
  
    std::cout << "----------" << std::endl;
@@ -128,7 +130,7 @@ BatchDataCPU::BatchDataCPU(const BatchData& batch_data, bool copy_data) :
    // deflate GPU decompression
    size_t decomp_temp_bytes;
    nvcompStatus_t status = nvcompBatchedGzipDecompressGetTempSize(
-       compress_data.size(), chunk_size * 10, &decomp_temp_bytes);
+       compress_data.size(), max_decomp_size, &decomp_temp_bytes);
    if (status != nvcompSuccess) {
      throw std::runtime_error("nvcompBatchedGzipDecompressGetTempSize() failed.");
    }

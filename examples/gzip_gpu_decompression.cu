@@ -29,56 +29,76 @@
  #include "zlib.h"
  #include "nvcomp/gzip.h"
 
+// modelled after BatchData(BatchDataCPU, bool) and operator==(BatchDataCPU, BatchData)
+// seems i didn't need to write this and could have just used BatchDataCPU(void**, size_t*, uint8_t*, size_t, bool)
+BatchDataCPU::BatchDataCPU(const BatchData& batch_data, bool copy_data) :
+  m_ptrs(),
+  m_sizes(),
+  m_data(),
+  m_size()
+{
+  m_size = batch_data.size();std::cerr<<__LINE__<<std::endl;
+  m_sizes = std::vector<size_t>(batch_data.size());std::cerr<<__LINE__<<std::endl;
+  CUDA_CHECK(cudaMemcpy(
+      m_sizes.data(),
+      batch_data.sizes(),
+      batch_data.size() * sizeof(size_t),
+      cudaMemcpyDeviceToHost));std::cerr<<__LINE__<<std::endl;
+
+  size_t data_size = std::accumulate(
+        sizes(),
+        sizes() + size(),
+        static_cast<size_t>(0));std::cerr<<__LINE__<<std::endl;
+        std::cerr << "data_size: " << data_size << std::endl;
+  m_data = std::vector<uint8_t>(data_size);std::cerr<<__LINE__<<std::endl;
+
+  size_t offset = 0;std::cerr<<__LINE__<<std::endl;
+  std::vector<void*> ptrs(size());std::cerr<<__LINE__<<std::endl;
+  for (size_t i = 0; i < size(); ++i) {
+    ptrs[i] = data() + offset;
+    offset += sizes()[i];
+  }std::cerr<<__LINE__<<std::endl;
+  m_ptrs = std::vector<void*>(ptrs);std::cerr<<__LINE__<<std::endl;
+
+  if (copy_data) {
+    std::vector<void*> src(batch_data.size());
+    CUDA_CHECK(cudaMemcpy(
+        src.data(),
+        batch_data.ptrs(),
+        batch_data.size() * sizeof(void*),
+        cudaMemcpyDeviceToHost));
+
+    const size_t* bytes = sizes();std::cerr<<__LINE__<<std::endl;
+    for (size_t i = 0; i < size(); ++i) {
+      CUDA_CHECK(
+          cudaMemcpy(ptrs[i], src[i], bytes[i], cudaMemcpyDeviceToHost));
+      // std::cerr << "i: " << i << ", ptrs[i][0-10]: " << ((char*)ptrs[i])[0] << ((char*)ptrs[i])[1] << ((char*)ptrs[i])[2] << ((char*)ptrs[i])[3] << ((char*)ptrs[i])[4] << ((char*)ptrs[i])[5] << ((char*)ptrs[i])[6] << ((char*)ptrs[i])[7] << ((char*)ptrs[i])[8] << ((char*)ptrs[i])[9] << ((char*)ptrs[i])[10] << " ptrs[i][-10:]: " << ((char*)ptrs[i])[bytes[i]-10] << ((char*)ptrs[i])[bytes[i]-9] << ((char*)ptrs[i])[bytes[i]-8] << ((char*)ptrs[i])[bytes[i]-7] << ((char*)ptrs[i])[bytes[i]-6] << ((char*)ptrs[i])[bytes[i]-5] << ((char*)ptrs[i])[bytes[i]-4] << ((char*)ptrs[i])[bytes[i]-3] << ((char*)ptrs[i])[bytes[i]-2] << ((char*)ptrs[i])[bytes[i]-1] << std::endl;
+    }
+
+    std::cerr << "strlen(ptrs[0]): " << strlen((char*)ptrs[0]) << std::endl;
+  }
+}
+
  // Benchmark performance from the binary data file fname
  static void run_example(const std::vector<std::vector<char>>& data)
  {
    size_t total_bytes = 0;
+   std::vector<size_t> block_sizes;
    for (const std::vector<char>& part : data) {
-     total_bytes += part.size();
+     // get uncompressed size of file from gzip footer
+     total_bytes += *(size_t*)(part.data() + part.size() - 4);
    }
  
    std::cout << "----------" << std::endl;
    std::cout << "files: " << data.size() << std::endl;
    std::cout << "uncompressed (B): " << total_bytes << std::endl;
  
+   // seems to be the maximum chunk size
    const size_t chunk_size = 1 << 16;
  
    // build up input batch on CPU
-   BatchDataCPU input_data_cpu(data, chunk_size);
-   std::cout << "chunks: " << input_data_cpu.size() << std::endl;
- 
-   // compression
- 
-   // Allocate and prepare output/compressed batch
-   BatchDataCPU compress_data_cpu(
-       chunk_size, input_data_cpu.size());
- 
-   // loop over chunks on the CPU, compressing each one
-   for (size_t i = 0; i < input_data_cpu.size(); ++i) {
-    //zlib::deflate
-    z_stream zs;
-    zs.zalloc = NULL; zs.zfree = NULL;
-    zs.msg = NULL;
-    zs.next_in  = (Bytef *)input_data_cpu.ptrs()[i];
-    zs.avail_in = input_data_cpu.sizes()[i];
-    zs.next_out = (Bytef *)compress_data_cpu.ptrs()[i];
-    zs.avail_out = input_data_cpu.sizes()[i];
-    int strategy=Z_DEFAULT_STRATEGY; //Z_HUFFMAN_ONLY //Z_FIXED, Z_DEFAULT_STRATEGY 
-    // -15 to disable zlib header/footer
-    // 15|16 to enable gzip header
-    int ret = deflateInit2(&zs, 9, Z_DEFLATED, 15|16, 8, strategy);
-    if (ret!=Z_OK) {
-        throw std::runtime_error("Call to deflateInit2 failed: " + std::to_string(ret));
-    }
-    if ((ret = deflate(&zs, Z_FINISH)) != Z_STREAM_END) {
-        throw std::runtime_error("Gzip operation failed: " + std::to_string(ret));
-    }
-    if ((ret = deflateEnd(&zs)) != Z_OK) {
-        throw std::runtime_error("Call to deflateEnd failed: " + std::to_string(ret));
-    }
-    // set the actual compressed size
-    compress_data_cpu.sizes()[i] = zs.total_out;;
-   }
+   BatchDataCPU compress_data_cpu(data, data[0].size());
+   std::cout << "chunks: " << compress_data_cpu.size() << std::endl;
  
    // compute compression ratio
    size_t* compressed_sizes_host = compress_data_cpu.sizes();
@@ -94,7 +114,8 @@
    BatchData compress_data(compress_data_cpu, true);
  
    // Allocate and build up decompression batch on GPU
-   BatchData decomp_data(input_data_cpu, false);
+   BatchData decomp_data(total_bytes, 1);
+   std::cerr << "decomp_data.size(): " << decomp_data.size() << std::endl;
  
    // Create CUDA stream
    cudaStream_t stream;
@@ -108,16 +129,18 @@
    // deflate GPU decompression
    size_t decomp_temp_bytes;
    nvcompStatus_t status = nvcompBatchedGzipDecompressGetTempSize(
-       compress_data.size(), chunk_size, &decomp_temp_bytes);
+       compress_data.size(), chunk_size * 10, &decomp_temp_bytes);
    if (status != nvcompSuccess) {
      throw std::runtime_error("nvcompBatchedGzipDecompressGetTempSize() failed.");
    }
+   std::cerr << "decomp_temp_bytes: " << decomp_temp_bytes << std::endl;
  
    void* d_decomp_temp;
    CUDA_CHECK(cudaMalloc(&d_decomp_temp, decomp_temp_bytes));
  
    size_t* d_decomp_sizes;
    CUDA_CHECK(cudaMalloc(&d_decomp_sizes, decomp_data.size() * sizeof(size_t)));
+   std::cerr << "d_decomp_sizes: " << d_decomp_sizes << std::endl;
  
    nvcompStatus_t* d_status_ptrs;
    CUDA_CHECK(cudaMalloc(&d_status_ptrs, decomp_data.size() * sizeof(nvcompStatus_t)));
@@ -139,13 +162,36 @@
    if( status != nvcompSuccess){
      throw std::runtime_error("ERROR: nvcompBatchedGzipDecompressAsync() not successful");
    }
+
+   size_t* decomp_sizes_host = (size_t*)malloc(decomp_data.size() * sizeof(size_t));
+   std::cerr << "d_decomp_sizes: ";
+    CUDA_CHECK(cudaMemcpy(
+        decomp_sizes_host,
+        d_decomp_sizes,
+        decomp_data.size() * sizeof(size_t),
+        cudaMemcpyDeviceToHost));
+    for (size_t i = 0; i < decomp_data.size(); ++i) {
+      std::cerr << decomp_sizes_host[i] << " ";
+    }
+    std::cerr << std::endl;
+    free(decomp_sizes_host);
+
+    std::cerr << "d_status_ptrs: ";
+    nvcompStatus_t* status_ptrs_host = (nvcompStatus_t*)malloc(decomp_data.size() * sizeof(nvcompStatus_t));
+    CUDA_CHECK(cudaMemcpy(
+        status_ptrs_host,
+        d_status_ptrs,
+        decomp_data.size() * sizeof(nvcompStatus_t),
+        cudaMemcpyDeviceToHost));
+    for (size_t i = 0; i < decomp_data.size(); ++i) {
+      std::cerr << status_ptrs_host[i] << " ";
+    }
+    std::cerr << std::endl;
+    free(status_ptrs_host);
  
-   // Validate decompressed data against input
-   if (!(input_data_cpu == decomp_data))
-     throw std::runtime_error("Failed to validate decompressed data");
-   else
-     std::cout << "decompression validated :)" << std::endl;
- 
+   BatchDataCPU decomp_data_cpu(decomp_data, true);
+   std::cout << "chunks: " << decomp_data_cpu.size() << std::endl;
+
    // Re-run decompression to get throughput
    cudaEventRecord(start, stream);
    status = nvcompBatchedGzipDecompressAsync(
